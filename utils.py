@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import csv
 import random
 from collections import defaultdict
@@ -16,6 +14,24 @@ import matplotlib.pyplot as plt
 
 @dataclass(frozen=True)
 class PetRecord:
+	"""
+	Represents a single image entry in the dataset.
+
+	Attributes
+	----------
+	class_id : int
+		Numeric identifier of the class.
+
+	class_name : str
+		Human-readable class name
+		(e.g., 'Persian Cat').
+
+	filename : str
+		Image filename stored in the CSV.
+
+	path : Path
+		Full path to the image file.
+	"""	
 	class_id: int
 	class_name: str
 	filename: str
@@ -24,17 +40,52 @@ class PetRecord:
 
 @dataclass(frozen=True)
 class FeatureBundle:
-	haralick: np.ndarray
-	lbp_r1: np.ndarray
-	lbp_r2: np.ndarray
-	hog: np.ndarray
-	bovw: np.ndarray
-	color_moments: np.ndarray
-	gabor: np.ndarray
-	hsv_histogram: np.ndarray
+    """
+    Container that stores all descriptors extracted
+    from a single image.
+
+    Keeping all descriptors together makes it easier
+    to compare individual descriptors or combine them
+    later during classification and retrieval tasks.
+    """
+
+    # Texture descriptor based on gray-level co-occurrence matrices
+    haralick: np.ndarray
+
+    # Local Binary Pattern histogram (radius = 1)
+    lbp_r1: np.ndarray
+
+    # Local Binary Pattern histogram (radius = 2)
+    lbp_r2: np.ndarray
+
+    # Histogram of Oriented Gradients
+    hog: np.ndarray
+
+    # Bag of Visual Words histogram
+    bovw: np.ndarray
+
+    # Mean, standard deviation and skewness
+    # extracted from LAB channels
+    color_moments: np.ndarray
+
+    # Multi-scale texture responses obtained
+    # using Gabor filters
+    gabor: np.ndarray
+
+    # HSV color histogram
+    hsv_histogram: np.ndarray
 
 
-def load_pet_records(csv_path: str | Path, image_root: str | Path = "pets256") -> list[PetRecord]:
+def load_pet_records(csv_path: str | Path,
+                     image_root: str | Path = "pets256") -> list[PetRecord]:
+	"""
+	Reads the metadata CSV and creates a list of
+	PetRecord objects.
+
+	Each row in the CSV corresponds to a single image.
+	The resulting structure keeps both class information
+	and the path required to load the image later.
+	"""
 	csv_path = Path(csv_path)
 	image_root = Path(image_root)
 
@@ -64,6 +115,21 @@ def split_pets_by_class(
 	min_images: int = 3,
 	seed: int = 42,
 ) -> tuple[list[PetRecord], list[PetRecord], list[PetRecord], list[str]]:
+	"""
+	Performs a stratified split.
+
+	Images belonging to the same class are grouped
+	together before splitting so that every class
+	contributes samples to:
+
+		- Training set
+		- Validation set
+		- Test set
+
+	Classes with too few images are ignored because
+	they cannot be reliably distributed across the
+	three subsets.
+	"""
 	grouped: dict[str, list[PetRecord]] = defaultdict(list)
 	for record in records:
 		grouped[record.class_name].append(record)
@@ -121,7 +187,30 @@ def to_gray(image: np.ndarray) -> np.ndarray:
 	return np.asarray(Image.fromarray(image).convert("L"))
 
 
-def haralick_features(image: np.ndarray, levels: int = 32) -> np.ndarray:
+def haralick_features(image: np.ndarray,
+                      levels: int = 32) -> np.ndarray:
+	"""
+	Extracts Haralick texture descriptors.
+
+	Workflow
+	--------
+	1. Convert image to grayscale.
+	2. Quantize intensities into a smaller number
+		of gray levels.
+	3. Build Gray-Level Co-occurrence Matrices (GLCM)
+		for multiple directions.
+	4. Compute statistical texture measures.
+	5. Average descriptors across directions.
+
+	Returned Features
+	-----------------
+	max_p      : Maximum probability
+	corr       : Correlation
+	contr      : Contrast
+	energ      : Energy
+	homog      : Homogeneity
+	entropy    : Entropy
+	"""	
 	gray = to_gray(image)
 	step = max(1, 256 // levels)
 	quantized = np.clip(gray // step, 0, levels - 1).astype(np.int32)
@@ -175,6 +264,21 @@ def haralick_features(image: np.ndarray, levels: int = 32) -> np.ndarray:
 
 
 def lbp_features(image: np.ndarray, points: int = 8, radius: int = 1) -> np.ndarray:
+	"""
+	Computes Local Binary Pattern (LBP) features.
+
+	For each pixel, neighboring pixels are compared
+	against the center pixel.
+
+	Neighbor >= Center -> bit = 1
+	Neighbor <  Center -> bit = 0
+
+	The resulting binary pattern is converted into
+	an integer code. A histogram of all codes forms
+	the descriptor.
+
+	LBP is widely used for texture recognition.
+	"""
 	gray = to_gray(image).astype(np.float32)
 	if gray.shape[0] <= 2 * radius or gray.shape[1] <= 2 * radius:
 		return np.zeros(2**points, dtype=np.float64)
@@ -200,6 +304,26 @@ def lbp_features(image: np.ndarray, points: int = 8, radius: int = 1) -> np.ndar
 
 
 def color_moments_features(image: np.ndarray) -> np.ndarray:
+	"""
+	Extracts Color Moments from the image.
+
+	Color Moments summarize the distribution of pixel
+	intensities in each color channel using three statistics:
+
+	1. Mean      -> average color intensity
+	2. Standard Deviation -> color variation
+	3. Skewness  -> asymmetry of the distribution
+
+	The image is first converted to the LAB color space,
+	which separates luminance (L) from chromatic information
+	(A and B channels).
+
+	For each LAB channel, the descriptor computes:
+		[mean, std, skewness]
+
+	Result:
+		3 channels × 3 statistics = 9 features
+	"""
 	lab = np.asarray(Image.fromarray(image).convert("LAB"), dtype=np.float32)
 	channels = [lab[:, :, index].reshape(-1) for index in range(3)]
 	features: list[float] = []
@@ -216,6 +340,18 @@ def color_moments_features(image: np.ndarray) -> np.ndarray:
 
 
 def hog_features(image: np.ndarray, bins: int = 8) -> np.ndarray:
+	"""
+	Computes a simplified Histogram of Oriented Gradients.
+
+	Steps
+	-----
+	1. Estimate image gradients using Sobel filters.
+	2. Compute gradient magnitude and orientation.
+	3. Accumulate magnitudes into orientation bins.
+	4. Normalize the histogram.
+
+	Captures edge structure and object shape.
+	"""
 	gray = to_gray(image).astype(np.float32)
 	grad_x = ndimage.sobel(gray, axis=1, mode="reflect")
 	grad_y = ndimage.sobel(gray, axis=0, mode="reflect")
@@ -236,6 +372,28 @@ def gabor_features(
 	sigma: float = 4.0,
 	gamma: float = 0.5,
 ) -> np.ndarray:
+	"""
+	Extracts texture descriptors using a bank of
+	Gabor filters.
+
+	Gabor filters act like orientation- and frequency-
+	selective detectors, similar to the receptive fields
+	found in the human visual cortex.
+
+	Each filter responds strongly to texture patterns
+	with a specific:
+
+		- Orientation (direction)
+		- Frequency (scale)
+
+	For every filter response, two statistics are stored:
+
+		1. Mean response magnitude
+		2. Standard deviation of response magnitude
+
+	The final descriptor concatenates all responses from
+	the filter bank.
+	"""
 	gray = to_gray(image).astype(np.float32) / 255.0
 	features: list[float] = []
 	kernel_radius = max(4, int(round(3 * sigma)))
@@ -260,6 +418,24 @@ def gabor_features(
 
 
 def hsv_histogram_features(image: np.ndarray, bins: int = 6) -> np.ndarray:
+	"""
+	Computes a color histogram in HSV space.
+
+	HSV separates color information into:
+
+		H -> Hue (color type)
+		S -> Saturation (color purity)
+		V -> Value (brightness)
+
+	A histogram is computed independently for
+	each channel and then concatenated.
+
+	The final histogram is normalized so that
+	it becomes independent of image size.
+
+	Result:
+		3 channels × bins
+	"""
 	hsv = np.asarray(Image.fromarray(image).convert("HSV"), dtype=np.float32)
 	channel_histograms: list[np.ndarray] = []
 	for channel_index in range(3):
@@ -275,6 +451,18 @@ def hsv_histogram_features(image: np.ndarray, bins: int = 6) -> np.ndarray:
 
 
 def region_lbp_features(image: np.ndarray, region_size: int = 32, points: int = 8, radius: int = 1) -> np.ndarray:
+	"""
+	Extracts LBP descriptors from multiple image regions.
+
+	Instead of describing the entire image with a
+	single LBP histogram, the image is divided into
+	small patches.
+
+	Each patch generates its own LBP descriptor.
+
+	This preserves some spatial information and is
+	particularly useful for Bag of Visual Words (BoVW).
+	"""
 	height, width = image.shape[:2]
 	regions: list[np.ndarray] = []
 	for row_start in range(0, height, region_size):
@@ -295,6 +483,21 @@ def build_bovw_codebook(
 	points: int = 8,
 	radius: int = 1,
 ) -> np.ndarray:
+	"""
+	Creates the visual vocabulary used by
+	the Bag of Visual Words model.
+
+	Process
+	-------
+	1. Divide images into small regions.
+	2. Extract an LBP descriptor from each region.
+	3. Collect descriptors from all training images.
+	4. Cluster descriptors using k-means.
+	5. Use cluster centers as visual words.
+
+	The resulting codebook acts like a dictionary
+	of common local texture patterns.
+	"""
 	region_features: list[np.ndarray] = []
 	for record in records:
 		image = load_rgb_image(record.path)
@@ -316,6 +519,27 @@ def bovw_features(
 	points: int = 8,
 	radius: int = 1,
 ) -> np.ndarray:
+	"""
+	Computes the Bag of Visual Words (BoVW) representation
+	for a single image.
+
+	Workflow
+	--------
+	1. Divide the image into small regions.
+	2. Extract an LBP descriptor from each region.
+	3. Compare each region descriptor against all visual
+	words in the codebook.
+	4. Assign the region to its nearest visual word.
+	5. Count how many times each visual word appears.
+	6. Normalize the resulting histogram.
+
+	The final descriptor represents the image as a
+	distribution of visual words, analogous to how a
+	text document can be represented by word frequencies.
+	"""
+
+	# If no visual vocabulary exists,
+	# return an empty descriptor.
 	if codebook.size == 0:
 		return np.zeros(0, dtype=np.float64)
 
@@ -333,6 +557,21 @@ def bovw_features(
 
 
 def extract_feature_bundle(image: np.ndarray, codebook: np.ndarray) -> FeatureBundle:
+	"""
+	Extracts all descriptors for a single image and
+	stores them inside a FeatureBundle object.
+
+	This function acts as a central feature extraction
+	pipeline, ensuring that all descriptors are computed
+	consistently for every image.
+
+	The resulting FeatureBundle can later be used for:
+
+		- Descriptor evaluation
+		- Descriptor fusion
+		- Classification
+		- Image retrieval
+	"""
 	return FeatureBundle(
 		haralick=haralick_features(image),
 		lbp_r1=lbp_features(image, points=8, radius=1),
@@ -363,6 +602,18 @@ def extract_feature_bundle(
 	gabor_gamma: float = 0.5,
 	hsv_bins: int = 6,
 ) -> FeatureBundle:
+	"""
+	Extracts all image descriptors using configurable
+	parameters.
+
+	Unlike the simplified version, this implementation
+	allows descriptor hyperparameters to be adjusted,
+	making it useful for experimentation and performance
+	optimization.
+
+	All extracted descriptors are grouped into a single
+	FeatureBundle object.
+	"""
 	return FeatureBundle(
 		haralick=haralick_features(image, levels=haralick_levels),
 		lbp_r1=lbp_features(image, points=lbp_points, radius=lbp_radius_r1),
@@ -393,6 +644,27 @@ def extract_bundles(
 	gabor_gamma: float = 0.5,
 	hsv_bins: int = 6,
 ) -> tuple[list[str], list[FeatureBundle]]:
+	"""
+	Extracts descriptor bundles for an entire dataset.
+
+	For each image:
+		1. Load image from disk.
+		2. Extract all descriptors.
+		3. Store descriptors in a FeatureBundle.
+		4. Save the corresponding class label.
+
+	Returns
+	-------
+	labels:
+		Ground-truth class labels.
+
+	bundles:
+		FeatureBundle objects containing all extracted
+		descriptors for each image.
+
+	The resulting data can be converted into feature
+	matrices for classification or retrieval tasks.
+	"""
 	labels: list[str] = []
 	bundles: list[FeatureBundle] = []
 	for record in records:
@@ -421,10 +693,42 @@ def extract_bundles(
 
 
 def matrix_from_bundles(bundles: list[FeatureBundle], name: str) -> np.ndarray:
+	"""
+	Converts a descriptor stored inside multiple
+	FeatureBundle objects into a feature matrix.
+
+	Example:
+
+		bundles[0].hog
+		bundles[1].hog
+		bundles[2].hog
+
+	becomes:
+
+		[
+			hog_1,
+			hog_2,
+			hog_3
+		]
+
+	Each row corresponds to one image.
+	"""
 	return np.vstack([getattr(bundle, name) for bundle in bundles])
 
 
 def standardize_features(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	"""
+	Applies z-score normalization.
+
+	For each feature dimension:
+
+		x' = (x - mean) / std
+
+	This places all descriptor dimensions on a
+	comparable scale, preventing features with
+	larger numeric ranges from dominating the
+	Euclidean distance calculation.
+	"""
 	mean = matrix.mean(axis=0)
 	std = matrix.std(axis=0)
 	std[std == 0] = 1.0
@@ -432,10 +736,29 @@ def standardize_features(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
 
 
 def apply_standardization(matrix: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+	"""
+	Applies previously computed normalization
+	parameters to new data.
+
+	Important:
+		Test and validation sets must use the
+		training-set statistics to avoid
+		data leakage.
+	"""
 	return (matrix - mean) / std
 
 
 def train_nearest_centroid(features: np.ndarray, labels: list[str]) -> dict[str, np.ndarray]:
+	"""
+	Trains a Nearest Centroid classifier.
+
+	For each class:
+		centroid = mean(feature vectors)
+
+	Classification is performed by assigning a sample
+	to the class whose centroid is closest in Euclidean
+	space.
+	"""
 	label_array = np.asarray(labels)
 	centroids: dict[str, np.ndarray] = {}
 	for class_name in sorted(set(labels)):
@@ -445,6 +768,19 @@ def train_nearest_centroid(features: np.ndarray, labels: list[str]) -> dict[str,
 
 
 def predict_nearest_centroid(features: np.ndarray, centroids: dict[str, np.ndarray]) -> list[str]:
+	"""
+	Classifies samples using the Nearest Centroid rule.
+
+	For each feature vector:
+
+		1. Compute Euclidean distance to all class centroids.
+		2. Select the closest centroid.
+		3. Assign the corresponding class.
+
+	This is one of the simplest classification methods
+	and works well when classes form compact clusters
+	in feature space.
+	"""
 	class_names = list(centroids)
 	centroid_matrix = np.vstack([centroids[name] for name in class_names])
 	predictions: list[str] = []
@@ -469,6 +805,23 @@ def evaluate_feature_set(
 	test_matrix: np.ndarray,
 	test_labels: list[str],
 ) -> tuple[float, float]:
+	"""
+	Evaluates a descriptor independently.
+
+	Pipeline
+	--------
+	1. Standardize training features.
+	2. Apply the same normalization to validation
+		and test sets.
+	3. Train a Nearest Centroid classifier.
+	4. Compute validation accuracy.
+	5. Compute test accuracy.
+
+	Returns
+	-------
+	validation_score : float
+	test_score : float
+	"""
 	train_scaled, mean, std = standardize_features(train_matrix)
 	validation_scaled = apply_standardization(validation_matrix, mean, std)
 	test_scaled = apply_standardization(test_matrix, mean, std)
@@ -483,10 +836,22 @@ def combine_feature_blocks(blocks: list[np.ndarray]) -> np.ndarray:
 	return np.concatenate(blocks, axis=1)
 
 
-
-###########################
-# Visualization utilities
-###########################
+# ==================================================
+# VISUALIZATION UTILITIES
+# ==================================================
+#
+# These functions help inspect:
+#
+# - Dataset balance
+# - Sample images
+# - Descriptor performance
+# - BoVW visual words
+# - Classification predictions
+#
+# They are not required for training but are useful
+# for understanding and debugging the pipeline.
+#
+# ==================================================
 
 def iter_bovw_patches(image, region_size, points=8, radius=1):
     height, width = image.shape[:2]
@@ -590,3 +955,70 @@ def plot_final_comparison(labels, scores):
     ax.set_title('Final comparison on the test split')
     ax.tick_params(axis='x', rotation=20)
     fig.tight_layout()
+
+
+def plot_sample_predictions(records, true_labels, predicted_labels):
+    # Select one sample from each class
+    selected_indices = []
+
+    for class_name in sorted(np.unique(true_labels)):
+        class_indices = np.where(np.array(true_labels) == class_name)[0]
+
+        rng = np.random.default_rng(42)
+        selected_indices.append(rng.choice(class_indices))
+
+    # Plot configuration
+    cols = 4
+    rows = int(np.ceil(len(selected_indices) / cols))
+
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(16, 4 * rows)
+    )
+
+    axes = np.atleast_1d(axes).flatten()
+
+    for ax, idx in zip(axes, selected_indices):
+
+        record = records[idx]
+
+        image = load_rgb_image(record.path)
+
+        true_label = true_labels[idx]
+        predicted_label = predicted_labels[idx]
+
+        correct = true_label == predicted_label
+
+        ax.imshow(image)
+
+        title_color = "green" if correct else "red"
+
+        ax.set_title(
+            f"GT: {true_label}\n"
+            f"Pred: {predicted_label}\n"
+            f"{'✓ Correct' if correct else '✗ Wrong'}",
+            fontsize=9,
+            color=title_color
+        )
+
+        ax.axis("off")
+
+    # Hide unused axes
+    for ax in axes[len(selected_indices):]:
+        ax.axis("off")
+
+    fig.suptitle(
+        "One Test Example Per Class",
+        fontsize=14
+    )
+
+    fig.tight_layout()
+    plt.show()
+
+    accuracy = accuracy_score(
+        true_labels,
+        predicted_labels
+    )
+
+    print(f"Test Accuracy: {accuracy:.3f}")
