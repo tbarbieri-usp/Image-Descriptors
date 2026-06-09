@@ -5,12 +5,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Counter, Iterable
 
-from PIL import Image
+import pandas as pd
 import numpy as np
+
+from PIL import Image
 from scipy import ndimage
 from scipy.cluster import vq
+from scipy.spatial.distance import cdist
+
+from umap import UMAP
+
+from itertools import product, combinations
 
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 @dataclass(frozen=True)
 class PetRecord:
@@ -839,20 +847,48 @@ def combine_feature_blocks(blocks: list[np.ndarray]) -> np.ndarray:
 # ==================================================
 # VISUALIZATION UTILITIES
 # ==================================================
-#
-# These functions help inspect:
-#
-# - Dataset balance
-# - Sample images
-# - Descriptor performance
-# - BoVW visual words
-# - Classification predictions
-#
-# They are not required for training but are useful
-# for understanding and debugging the pipeline.
-#
-# ==================================================
 
+########## GLOBAL ##########
+
+def sample_images(records, num_samples=8):
+    # Show a small grid of training images from different classes.
+    sample_records = []
+    seen_classes = set()
+    for record in records:
+        if record.class_name not in seen_classes:
+            sample_records.append(record)
+            seen_classes.add(record.class_name)
+        if len(sample_records) == num_samples:
+            break
+
+    fig, axes = plt.subplots(2, 4, figsize=(14, 7))
+    for ax, record in zip(axes.flat, sample_records):
+        image = load_rgb_image(record.path)
+        ax.imshow(image)
+        ax.set_title(record.class_name, fontsize=9)
+        ax.axis('off')
+
+    for ax in axes.flat[len(sample_records):]:
+        ax.axis('off')
+
+    fig.suptitle('Example images', y=1.02)
+    fig.tight_layout()
+
+
+def plot_classes_distribution(train_records):
+    # Visualize how many samples each class contributes to the training split.
+    train_counts = Counter(record.class_name for record in train_records)
+    classes = sorted(train_counts)
+    counts = [train_counts[class_name] for class_name in classes]
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.bar(classes, counts, color='#2a9d8f')
+    ax.set_title('Training samples per class')
+    ax.set_ylabel('Images')
+    ax.tick_params(axis='x', rotation=90)
+    fig.tight_layout()
+
+########## CLASSIFICATION PIPELINE ##########
 def iter_bovw_patches(image, region_size, points=8, radius=1):
     height, width = image.shape[:2]
     for row_start in range(0, height, region_size):
@@ -891,43 +927,6 @@ def plot_bovw_representative_patches(bovw_codebook, train_records, region_size=3
         ax.axis('off')
 
     fig.suptitle('Representative patches for BoVW words', y=1.02)
-    fig.tight_layout()
-
-def plot_classes_distribution(train_records):
-    # Visualize how many samples each class contributes to the training split.
-    train_counts = Counter(record.class_name for record in train_records)
-    classes = sorted(train_counts)
-    counts = [train_counts[class_name] for class_name in classes]
-
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.bar(classes, counts, color='#2a9d8f')
-    ax.set_title('Training samples per class')
-    ax.set_ylabel('Images')
-    ax.tick_params(axis='x', rotation=90)
-    fig.tight_layout()
-
-def sample_training_images(records, num_samples=8):
-    # Show a small grid of training images from different classes.
-    sample_records = []
-    seen_classes = set()
-    for record in records:
-        if record.class_name not in seen_classes:
-            sample_records.append(record)
-            seen_classes.add(record.class_name)
-        if len(sample_records) == num_samples:
-            break
-
-    fig, axes = plt.subplots(2, 4, figsize=(14, 7))
-    for ax, record in zip(axes.flat, sample_records):
-        image = load_rgb_image(record.path)
-        ax.imshow(image)
-        ax.set_title(record.class_name, fontsize=9)
-        ax.axis('off')
-
-    for ax in axes.flat[len(sample_records):]:
-        ax.axis('off')
-
-    fig.suptitle('Example training images', y=1.02)
     fig.tight_layout()
 
 def plot_descriptor_comparison(labels, validation_scores, test_scores):
@@ -1022,3 +1021,414 @@ def plot_sample_predictions(records, true_labels, predicted_labels):
     )
 
     print(f"Test Accuracy: {accuracy:.3f}")
+
+########## SEARCH PIPELINE ##########
+def plot_umaps(
+    all_features,
+    labels,
+    descriptor_names,
+    descriptor_labels,
+    n_neighbors
+):
+    # Convert labels to NumPy array for indexing
+    labels = np.asarray(labels)
+
+    # Create a 2x4 grid of subplots
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    axes = axes.ravel()
+
+    # Generate one UMAP projection for each descriptor
+    for ax, descriptor_name in zip(
+        axes,
+        descriptor_names
+    ):
+        # Feature vectors and corresponding labels
+        X = all_features[descriptor_name]
+        y = labels
+
+        # Reduce feature dimensionality to 2D for visualization
+        embedding = UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=0.1,
+        ).fit_transform(X)
+
+        # Plot samples grouped by class
+        for label in np.unique(y):
+            mask = y == label
+
+            ax.scatter(
+                embedding[mask, 0],
+                embedding[mask, 1],
+                s=10,
+                alpha=0.7,
+                label=str(label)
+            )
+
+        # Configure subplot appearance
+        ax.set_title(descriptor_labels[descriptor_name])
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Create a single legend for all subplots
+    handles, lbls = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        lbls,
+        loc='center left',
+        bbox_to_anchor=(1, 0.5),
+        borderaxespad=0
+    )
+
+    # Adjust layout and display figure
+    plt.tight_layout()
+    plt.subplots_adjust(right=0.95)
+    plt.show()
+
+def retrieve_ranking(query_idx, feature_matrix, top_k=10):
+    # Feature vector of the query image
+    query = feature_matrix[query_idx]
+
+    # Compute Euclidean distance from the query to all images
+    distances = cdist(
+        query.reshape(1, -1),
+        feature_matrix,
+        metric='euclidean'
+    ).flatten()
+
+    # Sort images from most similar (smallest distance)
+    # to least similar (largest distance)
+    ranking = np.argsort(distances)
+
+    # Remove the query image itself from the ranking
+    ranking = ranking[ranking != query_idx]
+
+    # Return the top-k retrieved images and all distances
+    return ranking[:top_k], distances
+
+
+def precision_at_k(query_idx, ranking, labels):
+    # Class of the query image
+    query_label = labels[query_idx]
+
+    # Classes of the retrieved images
+    retrieved_labels = labels[ranking]
+
+    # Fraction of retrieved images belonging to the same class
+    return np.mean(retrieved_labels == query_label)
+
+
+def mean_precision_at_k(
+    feature_matrix,
+    labels,
+    k=10
+):
+    # Store precision values for all queries
+    precisions = []
+
+    # Use each image as a query once
+    for query_idx in range(len(labels)):
+
+        # Retrieve the top-k most similar images
+        ranking, _ = retrieve_ranking(
+            query_idx,
+            feature_matrix,
+            k
+        )
+
+        # Compute Precision@k for the current query
+        precisions.append(
+            precision_at_k(
+                query_idx,
+                ranking,
+                labels
+            )
+        )
+
+    # Average Precision@k over all queries
+    return np.mean(precisions)
+
+def show_random_queries(
+    feature_matrix,
+    records,
+    labels,
+    n_queries=5,
+    top_k=10,
+):
+    # Randomly select query images from the dataset
+    query_indices = random.sample(
+        range(len(labels)),
+        n_queries
+    )
+
+    # Display retrieval results for each selected query
+    for query_idx in query_indices:
+
+        query_label = labels[query_idx]
+
+        # Retrieve the top-k most similar images
+        ranking, distances = retrieve_ranking(
+            query_idx,
+            feature_matrix,
+            top_k=top_k,
+        )
+
+        # Create a row of plots:
+        # 1 query image + top-k retrieved images
+        fig, axes = plt.subplots(
+            1,
+            top_k + 1,
+            figsize=(3 * (top_k + 1), 3)
+        )
+
+        # Display the query image
+        axes[0].imshow(
+            load_rgb_image(records[query_idx].path)
+        )
+        axes[0].set_title(
+            f"Query\n{query_label}"
+        )
+        axes[0].axis("off")
+
+        # Display retrieved images in ranking order
+        for i, idx in enumerate(ranking):
+
+            retrieved_label = labels[idx]
+
+            axes[i + 1].imshow(
+                load_rgb_image(records[idx].path)
+            )
+
+            # Green if class matches the query, red otherwise
+            title_color = (
+                "green"
+                if retrieved_label == query_label
+                else "red"
+            )
+
+            axes[i + 1].set_title(
+                f"{retrieved_label}\n{distances[idx]:.2f}",
+                color=title_color
+            )
+
+            axes[i + 1].axis("off")
+
+        # Adjust spacing and show the result
+        plt.tight_layout()
+        plt.show()
+
+def combine_features(
+    feature_dict,
+    feature_names,
+):
+    # Concatenate multiple feature matrices into a single representation
+    return np.hstack([
+        feature_dict[name]
+        for name in feature_names
+    ])
+
+
+def evaluate_feature_combinations(
+    feature_dict,
+    labels,
+    max_features=None,
+    k=10,
+):
+
+    # List of available descriptors
+    names = list(feature_dict.keys())
+
+    # By default, test combinations using all descriptors
+    if max_features is None:
+        max_features = len(names)
+
+    # Store evaluation results
+    results = []
+
+    # Test combinations of increasing size
+    for size in tqdm(range(1, max_features + 1)):
+
+        # Generate all descriptor combinations of the current size
+        for combo in tqdm(combinations(names, size), leave=False):
+
+            # Build the combined feature matrix
+            X = combine_features(
+                feature_dict,
+                combo,
+            )
+
+            # Evaluate retrieval performance
+            score = mean_precision_at_k(
+                X,
+                labels,
+                k=k,
+            )
+
+            # Save combination and corresponding score
+            results.append({
+                "features": combo,
+                "n_features": size,
+                "precision": score,
+            })
+
+    # Convert results to a DataFrame
+    df = pd.DataFrame(results)
+
+    # Return combinations sorted by Precision@k
+    return df.sort_values(
+        "precision",
+        ascending=False
+    )
+
+def retrieve_weighted_fusion(
+    query_idx,
+    feature_dict,
+    feature_names,
+    weights,
+    top_k=10,
+):
+    # Accumulate weighted distances from multiple descriptors
+    total_distance = None
+
+    for feature_name, weight in zip(feature_names, weights):
+
+        # Feature matrix of the current descriptor
+        X = feature_dict[feature_name]
+
+        # Compute Euclidean distances from the query image
+        d = cdist(
+            X[query_idx].reshape(1, -1),
+            X,
+            metric="euclidean"
+        ).flatten()
+
+        # Add the weighted contribution of this descriptor
+        if total_distance is None:
+            total_distance = weight * d
+        else:
+            total_distance += weight * d
+
+    # Sort images by combined distance
+    ranking = np.argsort(total_distance)
+
+    # Remove the query image itself
+    ranking = ranking[ranking != query_idx]
+
+    # Return the top-k retrieved images
+    return ranking[:top_k]
+
+
+def mean_precision_at_k_weighted(
+    feature_dict,
+    feature_names,
+    weights,
+    labels,
+    k=10,
+):
+    # Store Precision@k values for all queries
+    scores = []
+
+    labels = np.asarray(labels)
+
+    # Use each image as a query
+    for query_idx in range(len(labels)):
+
+        # Retrieve images using weighted descriptor fusion
+        ranking = retrieve_weighted_fusion(
+            query_idx,
+            feature_dict,
+            feature_names,
+            weights,
+            top_k=k,
+        )
+
+        # Compute Precision@k for the current query
+        precision = np.mean(
+            labels[ranking] == labels[query_idx]
+        )
+
+        scores.append(precision)
+
+    # Average Precision@k over all queries
+    return np.mean(scores)
+
+def search_best_weights(
+    feature_dict,
+    feature_names,
+    labels,
+    candidate_weights=(0.25, 0.5, 1.0, 2.0, 4.0),
+    k=10,
+):
+    # Store the evaluation results for each weight combination
+    results = []
+
+    # Test all possible combinations of candidate weights
+    for weights in tqdm(
+        product(candidate_weights, repeat=len(feature_names)),
+        total=len(candidate_weights) ** len(feature_names),
+        desc="Weight search",
+    ):
+
+        # Evaluate retrieval performance using the current weights
+        score = mean_precision_at_k_weighted(
+            feature_dict,
+            feature_names,
+            weights,
+            labels,
+            k=k,
+        )
+
+        # Save weights and corresponding Precision@k
+        results.append({
+            "weights": weights,
+            "precision": score,
+        })
+
+    # Convert results to a DataFrame
+    df = pd.DataFrame(results)
+
+    # Return weight combinations sorted by performance
+    return df.sort_values(
+        "precision",
+        ascending=False,
+    )
+
+
+def plot_umap(
+    embedding,
+    labels,
+    features,
+):
+    # Convert labels to NumPy array for indexing
+    labels = np.asarray(labels)
+
+    # Create the visualization figure
+    plt.figure(figsize=(10, 8))
+
+    # Plot one group of points per class
+    for label in np.unique(labels):
+
+        mask = labels == label
+
+        plt.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            s=15,          # Marker size
+            alpha=0.7,     # Transparency
+            label=label,
+        )
+
+    # Display the descriptor(s) used to generate the embedding
+    plt.title(
+        f"UMAP - {' + '.join(features) if type(features) is list else features}"
+    )
+
+    # Place legend outside the plot area
+    plt.legend(
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left",
+        fontsize=8,
+    )
+
+    # Adjust layout and display figure
+    plt.tight_layout()
+    plt.show()
