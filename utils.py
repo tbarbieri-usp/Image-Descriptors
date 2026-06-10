@@ -18,6 +18,8 @@ from umap import UMAP
 from itertools import product, combinations
 
 import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+
 from tqdm import tqdm
 
 @dataclass(frozen=True)
@@ -1021,6 +1023,57 @@ def plot_sample_predictions(records, true_labels, predicted_labels):
     )
 
     print(f"Test Accuracy: {accuracy:.3f}")
+
+def plot_confusion_matrix(test_preds, test_labels):
+	class_names = sorted(np.unique(test_labels))
+
+	# Compute confusion matrix
+	test_cm = confusion_matrix(
+		test_labels,
+		test_preds,
+		labels=class_names
+	)
+
+	# Positive values on diagonal, negative elsewhere
+	display_cm = np.where(
+		np.eye(test_cm.shape[0], dtype=bool),
+		test_cm,
+		-test_cm
+	)
+
+	vmax = np.max(test_cm)
+
+	fig, ax = plt.subplots(figsize=(10, 8))
+
+	im = ax.imshow(
+		display_cm,
+		cmap="RdYlGn",
+		vmin=-vmax,
+		vmax=vmax,
+		interpolation="nearest"
+	)
+
+	plt.colorbar(im, ax=ax)
+
+	# Ticks and labels
+	ax.set_xticks(np.arange(len(class_names)))
+	ax.set_yticks(np.arange(len(class_names)))
+
+	ax.set_xticklabels(class_names)
+	ax.set_yticklabels(class_names)
+
+	# Put x labels on top
+	ax.tick_params(axis='x', labelrotation=90)
+	ax.xaxis.tick_top()
+	ax.xaxis.set_label_position('top')
+
+	ax.set_xlabel("Predicted Label")
+	ax.set_ylabel("True Label")
+
+	ax.set_title("Test Confusion Matrix\n(Green = Correct, Red = Incorrect)", pad=40)
+
+	plt.tight_layout()
+	plt.show()
 
 ########## SEARCH PIPELINE ##########
 def plot_umaps(
