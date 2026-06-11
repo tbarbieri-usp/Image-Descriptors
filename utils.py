@@ -18,6 +18,9 @@ from umap import UMAP
 from itertools import product, combinations
 
 import matplotlib.pyplot as plt
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+from matplotlib.colors import TABLEAU_COLORS
+
 from sklearn.metrics import confusion_matrix
 
 from tqdm import tqdm
@@ -1024,7 +1027,7 @@ def plot_sample_predictions(records, true_labels, predicted_labels):
 
     print(f"Test Accuracy: {accuracy:.3f}")
 
-def plot_confusion_matrix(test_preds, test_labels):
+def plot_confusion_matrix(test_preds, test_labels, descriptor=None):
 	class_names = sorted(np.unique(test_labels))
 
 	# Compute confusion matrix
@@ -1070,7 +1073,7 @@ def plot_confusion_matrix(test_preds, test_labels):
 	ax.set_xlabel("Predicted Label")
 	ax.set_ylabel("True Label")
 
-	ax.set_title("Test Confusion Matrix\n(Green = Correct, Red = Incorrect)", pad=40)
+	ax.set_title(f"Test Confusion Matrix{ ' - ' + descriptor if descriptor else ''}\n(Green = Correct, Red = Incorrect)", pad=40)
 
 	plt.tight_layout()
 	plt.show()
@@ -1485,3 +1488,119 @@ def plot_umap(
     # Adjust layout and display figure
     plt.tight_layout()
     plt.show()
+
+def plot_umap_images(
+		embedding,
+		labels,
+		records,
+		feature_name,
+		zoom=0.12,
+		save_title=None
+	):
+	"""
+	Plots a UMAP embedding using image thumbnails instead of points.
+
+	Parameters
+	----------
+	embedding : np.ndarray
+		UMAP coordinates (N, 2)
+
+	labels : list[str]
+		Class labels
+
+	records : list[ImageRecord]
+		Dataset records containing image paths
+
+	feature_name : str
+		Descriptor name for the plot title
+
+	zoom : float
+		Thumbnail size
+	"""
+
+	labels = np.asarray(labels)
+
+	fig, ax = plt.subplots(
+		figsize=(20, 16))
+
+	unique_labels = np.unique(labels)
+
+	colors = list(TABLEAU_COLORS.values())
+
+	color_map = {
+		label: colors[i % len(colors)]
+		for i, label in enumerate(unique_labels)
+	}
+
+	for (x, y), record, label in zip(
+		embedding,
+		records,
+		labels,
+	):
+
+		image = load_rgb_image(record.path)
+
+		imagebox = OffsetImage(
+			image,
+			zoom=zoom,
+			alpha=0.75
+		)
+
+		ab = AnnotationBbox(
+			imagebox,
+			(x, y),
+			frameon=True,
+			pad=0.05,
+			bboxprops=dict(
+				edgecolor=color_map[label],
+				linewidth=1,
+			),
+		)
+
+		ax.add_artist(ab)
+
+	ax.set_title(f'UMAP - {feature_name}')
+
+	ax.set_xticks([])
+	ax.set_yticks([])
+
+	padding = 0.5
+
+	ax.set_xlim(
+		embedding[:, 0].min() - padding,
+		embedding[:, 0].max() + padding,
+	)
+
+	ax.set_ylim(
+		embedding[:, 1].min() - padding,
+		embedding[:, 1].max() + padding,
+	)
+
+	handles = [
+		plt.Line2D(
+			[0],
+			[0],
+			marker='s',
+			color='w',
+			markerfacecolor=color_map[label],
+			markersize=10,
+			label=label,
+		)
+		for label in unique_labels
+	]
+
+	ax.legend(
+		handles=handles,
+		bbox_to_anchor=(1.05, 1),
+		loc='upper left',
+		fontsize=8,
+	)
+
+	if save_title:
+		plt.savefig(
+			f'{save_title}.png',
+			dpi=300,
+			bbox_inches='tight',
+		)
+
+	plt.show()
